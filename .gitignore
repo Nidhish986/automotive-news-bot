@@ -1,0 +1,4 @@
+.env
+sent_articles.txt
+__pycache__/
+*.pyc
