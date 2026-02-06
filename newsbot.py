@@ -4,40 +4,45 @@ import time
 import asyncio
 from telegram import Bot
 
+# ===== CONFIG =====
 RSS_URL = "https://www.automotiveworld.com/feed/"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
+# ===== TELEGRAM BOT =====
 bot = Bot(token=BOT_TOKEN)
 
-SENT_FILE = "sent_articles.txt"
-
-if not os.path.exists(SENT_FILE):
-    open(SENT_FILE, "w").close()
+# ===== MEMORY STORAGE (prevents duplicates while running) =====
+sent_links = set()
 
 print("Bot started...")
 
-async def send_message(message):
-    await bot.send_message(chat_id=CHAT_ID, text=message)
+async def check_news():
+    global sent_links
 
-while True:
-    try:
-        with open(SENT_FILE, "r") as f:
-            sent_links = f.read().splitlines()
+    feed = feedparser.parse(RSS_URL)
 
-        feed = feedparser.parse(RSS_URL)
+    for entry in feed.entries:
+        if entry.link not in sent_links:
+            message = f"📰 {entry.title}\n\n{entry.link}"
+            
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=message
+            )
 
-        for entry in feed.entries:
-            if entry.link not in sent_links:
-                message = f"📰 {entry.title}\n\n{entry.summary}\n\nRead more: {entry.link}"
-                asyncio.run(send_message(message))
+            sent_links.add(entry.link)
 
-                with open(SENT_FILE, "a") as f:
-                    f.write(entry.link + "\n")
+async def main():
+    while True:
+        try:
+            await check_news()
+            print("Checked RSS. Sleeping 10 minutes...")
+            await asyncio.sleep(600)  # 10 minutes
 
-        print("Checked RSS. Sleeping 10 minutes...")
-        time.sleep(600)
+        except Exception as e:
+            print("Error:", e)
+            await asyncio.sleep(60)
 
-    except Exception as e:
-        print("Error:", e)
-        time.sleep(60)
+if __name__ == "__main__":
+    asyncio.run(main())
