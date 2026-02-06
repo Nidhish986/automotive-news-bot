@@ -1,6 +1,7 @@
 import feedparser
 import os
 import time
+import asyncio
 from telegram import Bot
 
 RSS_URL = "https://www.automotiveworld.com/feed/"
@@ -16,6 +17,9 @@ if not os.path.exists(SENT_FILE):
 
 print("Bot started...")
 
+async def send_message(message):
+    await bot.send_message(chat_id=CHAT_ID, text=message)
+
 while True:
     try:
         with open(SENT_FILE, "r") as f:
@@ -26,7 +30,7 @@ while True:
         for entry in feed.entries:
             if entry.link not in sent_links:
                 message = f"📰 {entry.title}\n\n{entry.summary}\n\nRead more: {entry.link}"
-                bot.send_message(chat_id=CHAT_ID, text=message)
+                asyncio.run(send_message(message))
 
                 with open(SENT_FILE, "a") as f:
                     f.write(entry.link + "\n")
