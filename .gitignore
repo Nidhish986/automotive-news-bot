@@ -1,4 +1,5 @@
 .env
 sent_articles.txt
+bot_data.db
 __pycache__/
 *.pyc
