@@ -2,8 +2,11 @@ import os
 import sqlite3
 import logging
 import feedparser
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -11,13 +14,10 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# =========================
-# CONFIG
-# =========================
+# ================= CONFIG =================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RSS_URL = "https://www.automotiveworld.com/feed/"
-
 CHECK_INTERVAL = 600  # 10 minutes
 
 CATEGORIES = [
@@ -30,23 +30,15 @@ CATEGORIES = [
     "Software-Defined Vehicle",
 ]
 
-# =========================
-# LOGGING (MINIMAL CLEAN)
-# =========================
+# ================= LOGGING =================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
-
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-# =========================
-# DATABASE
-# =========================
+# ================= DATABASE =================
 
 def init_db():
     conn = sqlite3.connect("bot.db")
@@ -75,9 +67,34 @@ def init_db():
     conn.commit()
     conn.close()
 
-# =========================
-# CATEGORY MENU
-# =========================
+# ================= TEMP MEMORY =================
+
+user_selections = {}
+
+# ================= KEYBOARD BUILDER =================
+
+def build_keyboard(chat_id):
+    selected = user_selections.get(chat_id, set())
+    keyboard = []
+
+    for cat in CATEGORIES:
+        prefix = "✅ " if cat in selected else ""
+        keyboard.append([
+            InlineKeyboardButton(f"{prefix}{cat}", callback_data=f"toggle_{cat}")
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("🔘 Select All", callback_data="select_all"),
+        InlineKeyboardButton("🗑 Clear All", callback_data="clear_all"),
+    ])
+
+    keyboard.append([
+        InlineKeyboardButton("💾 Done", callback_data="done")
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+# ================= START =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -88,63 +105,96 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await send_category_menu(update)
-
-async def send_category_menu(update: Update):
-    keyboard = []
-
-    for cat in CATEGORIES:
-        keyboard.append([
-            InlineKeyboardButton(cat, callback_data=f"cat_{cat}")
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton("✅ Done", callback_data="done")
-    ])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    user_selections[chat_id] = set()
 
     await update.message.reply_text(
-        "Select categories (you can choose multiple):",
-        reply_markup=reply_markup,
+        "Select your categories:",
+        reply_markup=build_keyboard(chat_id)
     )
 
-# =========================
-# CATEGORY HANDLER
-# =========================
+# ================= SETTINGS =================
 
-async def category_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT category FROM user_categories WHERE chat_id=?",
+        (chat_id,)
+    )
+    categories = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    user_selections[chat_id] = set(categories)
+
+    await update.message.reply_text(
+        "Modify your categories:",
+        reply_markup=build_keyboard(chat_id)
+    )
+
+# ================= BUTTON HANDLER =================
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     chat_id = query.message.chat.id
     data = query.data
 
-    conn = sqlite3.connect("bot.db")
-    cursor = conn.cursor()
+    selected = user_selections.setdefault(chat_id, set())
 
-    if data.startswith("cat_"):
-        category = data.replace("cat_", "")
+    if data.startswith("toggle_"):
+        category = data.replace("toggle_", "")
 
-        cursor.execute("""
-            INSERT OR IGNORE INTO user_categories (chat_id, category)
-            VALUES (?, ?)
-        """, (chat_id, category))
+        if category in selected:
+            selected.remove(category)
+        else:
+            selected.add(category)
 
-        conn.commit()
-        await query.edit_message_text(f"✅ Added {category}")
+        await query.edit_message_reply_markup(
+            reply_markup=build_keyboard(chat_id)
+        )
+
+    elif data == "select_all":
+        selected.update(CATEGORIES)
+        await query.edit_message_reply_markup(
+            reply_markup=build_keyboard(chat_id)
+        )
+
+    elif data == "clear_all":
+        selected.clear()
+        await query.edit_message_reply_markup(
+            reply_markup=build_keyboard(chat_id)
+        )
 
     elif data == "done":
-        await query.edit_message_text("🎉 Your categories are saved!")
+        conn = sqlite3.connect("bot.db")
+        cursor = conn.cursor()
 
-    conn.close()
+        cursor.execute(
+            "DELETE FROM user_categories WHERE chat_id=?",
+            (chat_id,)
+        )
 
-# =========================
-# NEWS CHECKER
-# =========================
+        for cat in selected:
+            cursor.execute(
+                "INSERT INTO user_categories (chat_id, category) VALUES (?, ?)",
+                (chat_id, cat)
+            )
+
+        conn.commit()
+        conn.close()
+
+        await query.edit_message_text(
+            "🎉 Categories saved successfully!\n\nUse /settings to modify anytime."
+        )
+
+# ================= NEWS CHECKER =================
 
 async def check_news(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Checking for new news...")
+    logger.info("Checking news...")
 
     feed = feedparser.parse(RSS_URL)
 
@@ -156,7 +206,10 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
         title = entry.title
         summary = entry.summary
 
-        cursor.execute("SELECT link FROM sent_articles WHERE link=?", (link,))
+        cursor.execute(
+            "SELECT link FROM sent_articles WHERE link=?",
+            (link,)
+        )
         if cursor.fetchone():
             continue
 
@@ -164,45 +217,48 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
         users = cursor.fetchall()
 
         for (chat_id,) in users:
-            cursor.execute("""
-                SELECT category FROM user_categories
-                WHERE chat_id=?
-            """, (chat_id,))
-            user_categories = [row[0] for row in cursor.fetchall()]
+            cursor.execute(
+                "SELECT category FROM user_categories WHERE chat_id=?",
+                (chat_id,)
+            )
+            categories = [row[0] for row in cursor.fetchall()]
 
-            if any(cat.lower() in summary.lower() for cat in user_categories):
+            if any(cat.lower() in summary.lower() for cat in categories):
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=f"📰 {title}\n\n{link}"
                     )
-                except Exception:
+                except:
                     logger.warning(f"Failed sending to {chat_id}")
 
-        cursor.execute("INSERT OR IGNORE INTO sent_articles (link) VALUES (?)", (link,))
+        cursor.execute(
+            "INSERT OR IGNORE INTO sent_articles (link) VALUES (?)",
+            (link,)
+        )
         conn.commit()
 
     conn.close()
 
-# =========================
-# MAIN
-# =========================
+# ================= MAIN =================
 
 def main():
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN not set")
-
     init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(category_handler))
+    app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-    app.job_queue.run_repeating(check_news, interval=CHECK_INTERVAL, first=10)
+    app.job_queue.run_repeating(
+        check_news,
+        interval=CHECK_INTERVAL,
+        first=10
+    )
 
-    logger.info("Bot started successfully!")
-    app.run_polling()
+    logger.info("Bot started.")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
