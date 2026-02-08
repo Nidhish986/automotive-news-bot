@@ -11,11 +11,10 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ------------------ CONFIG ------------------
+# ================= CONFIG =================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 RSS_URL = "https://www.automotiveworld.com/feed/"
-
 CHECK_INTERVAL = 600  # 10 minutes
 
 CATEGORIES = [
@@ -34,12 +33,17 @@ CATEGORIES = [
     "Software-Defined Vehicle",
 ]
 
-# ------------------ LOGGING ------------------
+# ================= ULTRA CLEAN LOGGING =================
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
-# ------------------ DATABASE ------------------
+# ================= DATABASE =================
 
 def init_db():
     conn = sqlite3.connect("bot.db")
@@ -62,7 +66,7 @@ def init_db():
     conn.close()
 
 
-# ------------------ START COMMAND ------------------
+# ================= START COMMAND =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
@@ -82,7 +86,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ------------------ BUTTON HANDLER ------------------
+# ================= BUTTON HANDLER =================
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -123,11 +127,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
 
-# ------------------ NEWS CHECKER ------------------
+# ================= NEWS CHECKER =================
 
 async def check_news(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Checking for new news...")
-
     feed = feedparser.parse(RSS_URL)
 
     conn = sqlite3.connect("bot.db")
@@ -136,7 +138,7 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
     for entry in feed.entries:
         link = entry.link
 
-        # Skip if already sent globally
+        # Skip if already sent
         cursor.execute("SELECT * FROM sent_news WHERE link=?", (link,))
         if cursor.fetchone():
             continue
@@ -144,7 +146,6 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
         title = entry.title
         summary = entry.summary
 
-        # Get all unique users
         cursor.execute("SELECT DISTINCT chat_id FROM users")
         users = cursor.fetchall()
 
@@ -157,7 +158,8 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
             )
             categories = [row[0] for row in cursor.fetchall()]
 
-            if any(cat.lower() in title.lower() or cat.lower() in summary.lower()
+            if any(cat.lower() in title.lower() or
+                   cat.lower() in summary.lower()
                    for cat in categories):
 
                 message = f"📰 {title}\n\n{summary}\n\nRead more: {link}"
@@ -168,17 +170,19 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
                         text=message,
                         disable_web_page_preview=False
                     )
-                except Exception as e:
-                    logger.error(f"Error sending to {chat_id}: {e}")
+                except Exception:
+                    pass
 
-        # Mark as sent
-        cursor.execute("INSERT OR IGNORE INTO sent_news (link) VALUES (?)", (link,))
+        cursor.execute(
+            "INSERT OR IGNORE INTO sent_news (link) VALUES (?)",
+            (link,)
+        )
         conn.commit()
 
     conn.close()
 
 
-# ------------------ MAIN ------------------
+# ================= MAIN =================
 
 def main():
     init_db()
@@ -188,11 +192,13 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Schedule job
-    app.job_queue.run_repeating(check_news, interval=CHECK_INTERVAL, first=10)
+    app.job_queue.run_repeating(
+        check_news,
+        interval=CHECK_INTERVAL,
+        first=10
+    )
 
-    logger.info("Bot started successfully!")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
