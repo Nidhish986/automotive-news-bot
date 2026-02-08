@@ -35,6 +35,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- NEWS CHECK ----------------
 async def check_news(context: ContextTypes.DEFAULT_TYPE):
+    print("Checking for new news...")
     feed = feedparser.parse(RSS_URL)
 
     for entry in feed.entries:
@@ -58,6 +59,7 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
 # ---------------- MAIN ----------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    print("Bot started successfully!")
 
     app.add_handler(CommandHandler("start", start))
 
