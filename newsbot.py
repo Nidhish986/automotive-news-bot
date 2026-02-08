@@ -1,9 +1,9 @@
 import os
 import sqlite3
-import feedparser
 import logging
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+import feedparser
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -11,19 +11,16 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ================= CONFIG =================
+# =========================
+# CONFIG
+# =========================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 RSS_URL = "https://www.automotiveworld.com/feed/"
+
 CHECK_INTERVAL = 600  # 10 minutes
 
 CATEGORIES = [
-    "News",
-    "Articles",
-    "Magazine",
-    "Data",
-    "Newsletters",
-    "Events",
     "OEMs",
     "Markets",
     "Commercial Vehicle",
@@ -33,17 +30,23 @@ CATEGORIES = [
     "Software-Defined Vehicle",
 ]
 
-# ================= ULTRA CLEAN LOGGING =================
+# =========================
+# LOGGING (MINIMAL CLEAN)
+# =========================
 
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-# ================= DATABASE =================
+# =========================
+# DATABASE
+# =========================
 
 def init_db():
     conn = sqlite3.connect("bot.db")
@@ -51,13 +54,20 @@ def init_db():
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            chat_id INTEGER,
-            category TEXT
+            chat_id INTEGER PRIMARY KEY
         )
     """)
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sent_news (
+        CREATE TABLE IF NOT EXISTS user_categories (
+            chat_id INTEGER,
+            category TEXT,
+            PRIMARY KEY(chat_id, category)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sent_articles (
             link TEXT PRIMARY KEY
         )
     """)
@@ -65,71 +75,77 @@ def init_db():
     conn.commit()
     conn.close()
 
-
-# ================= START COMMAND =================
+# =========================
+# CATEGORY MENU
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (chat_id) VALUES (?)", (chat_id,))
+    conn.commit()
+    conn.close()
+
+    await send_category_menu(update)
+
+async def send_category_menu(update: Update):
     keyboard = []
 
-    for category in CATEGORIES:
+    for cat in CATEGORIES:
         keyboard.append([
-            InlineKeyboardButton(category, callback_data=f"toggle_{category}")
+            InlineKeyboardButton(cat, callback_data=f"cat_{cat}")
         ])
 
-    keyboard.append([InlineKeyboardButton("✅ Done", callback_data="done")])
+    keyboard.append([
+        InlineKeyboardButton("✅ Done", callback_data="done")
+    ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "Select categories you want to receive:",
-        reply_markup=reply_markup
+        "Select categories (you can choose multiple):",
+        reply_markup=reply_markup,
     )
 
+# =========================
+# CATEGORY HANDLER
+# =========================
 
-# ================= BUTTON HANDLER =================
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def category_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    chat_id = query.message.chat_id
+    chat_id = query.message.chat.id
     data = query.data
 
     conn = sqlite3.connect("bot.db")
     cursor = conn.cursor()
 
-    if data.startswith("toggle_"):
-        category = data.replace("toggle_", "")
+    if data.startswith("cat_"):
+        category = data.replace("cat_", "")
 
-        cursor.execute(
-            "SELECT * FROM users WHERE chat_id=? AND category=?",
-            (chat_id, category)
-        )
-        exists = cursor.fetchone()
+        cursor.execute("""
+            INSERT OR IGNORE INTO user_categories (chat_id, category)
+            VALUES (?, ?)
+        """, (chat_id, category))
 
-        if exists:
-            cursor.execute(
-                "DELETE FROM users WHERE chat_id=? AND category=?",
-                (chat_id, category)
-            )
-            await query.edit_message_text(f"❌ Removed {category}")
-        else:
-            cursor.execute(
-                "INSERT INTO users (chat_id, category) VALUES (?, ?)",
-                (chat_id, category)
-            )
-            await query.edit_message_text(f"✅ Added {category}")
+        conn.commit()
+        await query.edit_message_text(f"✅ Added {category}")
 
     elif data == "done":
         await query.edit_message_text("🎉 Your categories are saved!")
 
-    conn.commit()
     conn.close()
 
-
-# ================= NEWS CHECKER =================
+# =========================
+# NEWS CHECKER
+# =========================
 
 async def check_news(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Checking for new news...")
+
     feed = feedparser.parse(RSS_URL)
 
     conn = sqlite3.connect("bot.db")
@@ -137,69 +153,56 @@ async def check_news(context: ContextTypes.DEFAULT_TYPE):
 
     for entry in feed.entries:
         link = entry.link
-
-        # Skip if already sent
-        cursor.execute("SELECT * FROM sent_news WHERE link=?", (link,))
-        if cursor.fetchone():
-            continue
-
         title = entry.title
         summary = entry.summary
 
-        cursor.execute("SELECT DISTINCT chat_id FROM users")
+        cursor.execute("SELECT link FROM sent_articles WHERE link=?", (link,))
+        if cursor.fetchone():
+            continue
+
+        cursor.execute("SELECT chat_id FROM users")
         users = cursor.fetchall()
 
-        for user in users:
-            chat_id = user[0]
+        for (chat_id,) in users:
+            cursor.execute("""
+                SELECT category FROM user_categories
+                WHERE chat_id=?
+            """, (chat_id,))
+            user_categories = [row[0] for row in cursor.fetchall()]
 
-            cursor.execute(
-                "SELECT category FROM users WHERE chat_id=?",
-                (chat_id,)
-            )
-            categories = [row[0] for row in cursor.fetchall()]
-
-            if any(cat.lower() in title.lower() or
-                   cat.lower() in summary.lower()
-                   for cat in categories):
-
-                message = f"📰 {title}\n\n{summary}\n\nRead more: {link}"
-
+            if any(cat.lower() in summary.lower() for cat in user_categories):
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text=message,
-                        disable_web_page_preview=False
+                        text=f"📰 {title}\n\n{link}"
                     )
                 except Exception:
-                    pass
+                    logger.warning(f"Failed sending to {chat_id}")
 
-        cursor.execute(
-            "INSERT OR IGNORE INTO sent_news (link) VALUES (?)",
-            (link,)
-        )
+        cursor.execute("INSERT OR IGNORE INTO sent_articles (link) VALUES (?)", (link,))
         conn.commit()
 
     conn.close()
 
-
-# ================= MAIN =================
+# =========================
+# MAIN
+# =========================
 
 def main():
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN not set")
+
     init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(category_handler))
 
-    app.job_queue.run_repeating(
-        check_news,
-        interval=CHECK_INTERVAL,
-        first=10
-    )
+    app.job_queue.run_repeating(check_news, interval=CHECK_INTERVAL, first=10)
 
-    app.run_polling(drop_pending_updates=True)
-
+    logger.info("Bot started successfully!")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
