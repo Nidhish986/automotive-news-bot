@@ -1,5 +1,24 @@
-.env
-sent_articles.txt
-bot_data.db
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+
+# Virtual Environment
+venv/
+.env/
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Railway (if local testing creates these)
+bot.db
